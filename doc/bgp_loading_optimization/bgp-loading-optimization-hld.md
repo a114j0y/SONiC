@@ -1,5 +1,5 @@
 <!-- omit in toc -->
-# BGP Loading Optimization for SONiC
+# BGP Routes Loading Time Optimization for SONiC
 
 <!-- omit in toc -->
 ### Revision
@@ -45,9 +45,10 @@ The goal of this project is to significantly increase the end-to-end BGP loading
   
 <figure align=center>
     <img src="images/performance.png" >
-    <figcaption>Figure 1. The module performance on Alibaba's platform loading 500k routes after optimization <figcaption>
+    <figcaption>Figure 1. The Module Performance after optimization on Alibaba's platform when loading 500k BGP routes<figcaption>
 </figure>  
 
+<br>
 
 
 The scope of this document only covers the performance optimization in `fpmsyncd`, `orchagent`, `syncd` and `zebra` and Redis I/O.
@@ -186,7 +187,6 @@ The main thread of `zebra` not only needs to send routes to `fpmsyncd`, but also
 - All modules should support the warm restart operations after modified
 - With the optimization of this HLD implemented, the end-to-end BGP loading performance should be improved at least by 95%
 - The new optimization codes would be turn off by default. It could be turned on via configuration
-
 
 ## High-Level Proposal
 
