@@ -7,6 +7,7 @@
 |:---:|:-----------:|:------------------:|-----------------------------------|
 | 0.1 | Aug 16 2023 |   FengSheng Yang   | Initial Draft                     |
 | 0.2 | Aug 29 2023 |   Yijiao Qin       | Supplement & Polish               |
+| 0.3 | Sept 5 2023 |   Nikhil Kelapure  | Async SAI additions               |
 
 <!-- omit in toc -->
 ## Table of Content
@@ -140,6 +141,16 @@ The main performance bottleneck here lies in the linearity of the 3 tasks.
     <figcaption>Figure 4. Syncd workflow<figcaption>
 </figure>  
 
+### Synchronous sairedis API usage
+
+The interaction between `orchagent` and `syncd` is using synchronous `sairedis` API.
+Once `orchagent` `doTask` writes data to ASIC_DB, it waits for response from `syncd`. And since there is only single thread in `orchagent` it cannot process other routing messages until the response is received and processed.
+
+<figure align=center>
+    <img src="images/sync-sairedis1.png" width="40%" height=20%>
+    <figcaption>Figure 5. Sync sairedis workflow<figcaption>
+</figure> 
+
 ### Redundant APPL_DB I/O traffic
 
 There is much Redis I/O traffic during the BGP loading process, from which we find two sources of unnecessary traffic.
@@ -166,7 +177,7 @@ The main thread of `zebra` not only needs to send routes to `fpmsyncd`, but also
 
 <figure align=center>
     <img src="images/zebra.jpg" width="60%" height=auto>
-    <figcaption>Figure 5. Zebra flame graph<figcaption>
+    <figcaption>Figure 6. Zebra flame graph<figcaption>
 </figure>  
 
 ## Requirements
@@ -186,12 +197,22 @@ Take `orchagent` for example, a single task of `orchagent` contains three sub-ta
 
 <figure align=center>
     <img src="images/pipeline-timeline.png">
-    <figcaption>Figure 6. Pipeline architecture compared with the original serial architecture<figcaption>
+    <figcaption>Figure 7. Pipeline architecture compared with the original serial architecture<figcaption>
 </figure>  
 
 #### Ring buffer for low-cost thread coordination
 Since multiple threads are employed, we take a lock-free design by using a ring buffer as an asynchronous communication channel.
 
+#### Asynchronous sairedis API usage
+Asynchronous mode `sairedis` API is used and a list of context of response pending messages is maintained on `orchagent` to process the response when its received
+
+<figure align=center>
+    <img src="images/async-sairedis2.png" width="40%" height=20%>
+    <figcaption>Figure 8. Async sairedis workflow<figcaption>
+</figure> 
+
+#### New ResponseThread in OA
+A new `ResponseThread` is used in `orchagent` to process the response when its received so that the other threads can continue processing new routing messages
 
 ### Streamlining Redis I/O
 
@@ -203,7 +224,7 @@ Instead of flushing the `pipeline` on every data arrival and propose to use a fl
 
 <figure align=center>
     <img src="images/pipeline-mode.png" height=auto>
-    <figcaption>Figure 7. Proposed new BGP loading workflow<figcaption>
+    <figcaption>Figure 9. Proposed new BGP loading workflow<figcaption>
 </figure>  
 
 #### Disable the temporary table mechanism in APPL_DB
@@ -265,6 +286,51 @@ class Consumer_pipeline : public Consumer {
 
 ### Syncd [similar optimization to orchagent]
 Similar case for syncd with orchagent. In our proposal, syncd runs `processBulkEntry` in a slave thread, since this function consumes most of the computing resources and blocks others.
+
+### Asynchronous sairedis API usage and new  ResponseThread in orchagent
+`orchagent` now uses synchronous `sairedis` API to send message to `syncd`
+
+**Orchagent**
+
+- RouteOrch sends bulk route add/update/del message as usual
+- For each bulk message sent, list of {prefix, Vrf} is preserved in a AckBuffer.
+- AckBuffer is added to pending-ACK queue
+- AckBuffer has prefixes in the same order as in the bulk message
+- OA can push at max N outstanding bulk messages to SAIRedis without waiting for ACK
+- Once pending-queue size reaches N, routes are held in m_toSync.
+- The CRM Used count will be incremented for each route processed by RouteOrch
+
+**Syncd**
+
+- Processes route bulk message one by one as usual
+- Makes bulk SAI api call for each bulk-route message
+- SAI api returns bulk status with ack/nack for each prefix
+- Response is sent back to OA using NotificationProducer.
+
+**ResponseThread** 
+New pthread in orchagent
+
+- Tasks performed
+  - Listen to bulk-ack messages from syncd using NotificationConsumer
+  - Match bulk-ack with bulk-route request message
+  
+- Shared data-structures protected using mutex
+  - Pending-ACK queue
+  
+- On each mutex lock
+  - Pending queue with bulk-route entries is moved to the ResponseThread context.
+  - New queue is initialized for main thread to add new entries
+  
+- ACK/NACK are processed in parallel to orchagent main thread
+  - ACK/NACK are added to APP_STATE_DB
+  - For NACK case the CRM ERR count will be incremented
+  
+- CRM resources is calculated by subtracting ERR count from Used count in CRM
+
+  <figure align=center>
+      <img src="images/async-sairedis3.png" width="auto" height=auto>
+      <figcaption>Figure 10. Async sairedis workflow<figcaption>
+  </figure> 
 
 ### Fpmsyncd
 
